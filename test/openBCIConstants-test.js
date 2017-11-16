@@ -5,7 +5,7 @@
 /* global describe, it, afterEach */
 let bluebirdChecks = require('./bluebirdChecks');
 let assert = require('assert');
-let k = require('../openBCIConstants');
+let k = require('../dist/constants');
 let chai = require('chai');
 let expect = chai.expect;
 let should = chai.should(); // eslint-disable-line no-unused-vars
@@ -1958,7 +1958,7 @@ describe('OpenBCIConstants', function () {
       assert.equal('Ganglion', k.OBCIGanglionPrefix);
     });
     it('Ganglion ble search time', function () {
-      assert.equal(0.032, k.OBCIGanglionAccelScaleFactor);
+      assert.equal(0.016, k.OBCIGanglionAccelScaleFactor);
     });
     it('Ganglion ble search time', function () {
       assert.equal(20000, k.OBCIGanglionBleSearchTime);

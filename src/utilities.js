@@ -1,9 +1,9 @@
 'use strict';
-const gaussian = require('gaussian');
-const k = require('./openBCIConstants');
-const StreamSearch = require('streamsearch');
-const Buffer = require('safe-buffer').Buffer;
-const _ = require('lodash');
+
+import gaussian from 'gaussian';
+import k from './constants';
+import StreamSearch from 'streamsearch';
+import { Buffer } from 'buffer/';
 
 /** Constants for interpreting the EEG data */
 // Reference voltage for ADC in ADS1299.
@@ -39,13 +39,17 @@ let utilitiesModule = {
    * @typedef {Object} RawDataToSample
    * @property {Array} rawDataPackets - An array of rawDataPackets
    * @property {Buffer} rawDataPacket - A single raw data packet
+   * @property {Buffer} multiPacketBuffer - This buffer is used to build up multiple messages over ble and emit them at once
    * @property {Array} channelSettings - The channel settings array
    * @property {Number} timeOffset (optional) for non time stamp use cases i.e. 0xC0 or 0xC1 (default and raw aux)
    * @property {Array} accelArray (optional) for non time stamp use cases
    * @property {Boolean} verbose (optional) for verbose output
    * @property {Number} lastSampleNumber (optional) - The last sample number
    * @property {Boolean} scale (optional) Default `true`. A gain of 24 for Cyton will be used and 51 for ganglion by default.
+   * @property {Array} decompressedSamples - An array to hold delta compression items
+   * @property {Boolean} sendCounts - True if you want raw A/D counts or scaled counts in samples
    */
+
   /**
    * @description Used to extract samples out of a buffer of unknown length
    * @param dataBuffer {Buffer} - A buffer to parse for samples
@@ -84,12 +88,7 @@ let utilitiesModule = {
           // this.timeOfPacketArrival = this.time();
           // Grab the raw packet, make a copy of it.
           let rawPacket;
-          if (k.getVersionNumber(process.version) >= 6) {
-            // From introduced in node version 6.x.x
-            rawPacket = Buffer.from(dataBuffer.slice(parsePosition, parsePosition + k.OBCIPacketSize));
-          } else {
-            rawPacket = new Buffer(dataBuffer.slice(parsePosition, parsePosition + k.OBCIPacketSize));
-          }
+          rawPacket = Buffer.from(dataBuffer.slice(parsePosition, parsePosition + k.OBCIPacketSize));
 
           // Emit that buffer
           // this.emit('rawDataPacket', rawPacket);
@@ -106,11 +105,7 @@ let utilitiesModule = {
           if (tempBuf.length === 0) {
             dataBuffer = null;
           } else {
-            if (k.getVersionNumber(process.version) >= 6) {
-              dataBuffer = Buffer.from(tempBuf);
-            } else {
-              dataBuffer = new Buffer(tempBuf);
-            }
+            dataBuffer = Buffer.from(tempBuf);
           }
           // Move the parse position up one packet
           parsePosition = -1;
@@ -126,7 +121,7 @@ let utilitiesModule = {
   },
   extractRawBLEDataPackets: (dataBuffer) => {
     let rawDataPackets = [];
-    if (!_.isBuffer(dataBuffer)) return rawDataPackets;
+    if (k.isNull(dataBuffer)) return rawDataPackets;
     // Verify the packet is of length 20
     if (dataBuffer.byteLength !== k.OBCIPacketSizeBLECyton) return rawDataPackets;
     let sampleNumbers = [0, 0, 0];
@@ -136,10 +131,9 @@ let utilitiesModule = {
     sampleNumbers[2] = sampleNumbers[1] + 1;
     if (sampleNumbers[2] > 255) sampleNumbers[2] -= 256;
     for (let i = 0; i < k.OBCICytonBLESamplesPerPacket; i++) {
-      let rawDataPacket = Buffer.alloc(k.OBCIPacketSize);
+      let rawDataPacket = utilitiesModule.samplePacketZero(sampleNumbers[i]);
       rawDataPacket[0] = k.OBCIByteStart;
       rawDataPacket[k.OBCIPacketPositionStopByte] = dataBuffer[0];
-      rawDataPacket[k.OBCIPacketPositionSampleNumber] = sampleNumbers[i];
       dataBuffer.copy(rawDataPacket, k.OBCIPacketPositionChannelDataStart, k.OBCIPacketPositionChannelDataStart + (i * 6), k.OBCIPacketPositionChannelDataStart + 6 + (i * 6));
       rawDataPackets.push(rawDataPacket);
     }
@@ -558,6 +552,9 @@ let utilitiesModule = {
   samplePacket: sampleNumber => {
     return new Buffer([0xA0, sampleNumberNormalize(sampleNumber), 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0, 7, 0, 0, 8, 0, 0, 0, 1, 0, 2, makeTailByteFromPacketType(k.OBCIStreamPacketStandardAccel)]);
   },
+  samplePacketZero: sampleNumber => {
+    return new Buffer([0xA0, sampleNumberNormalize(sampleNumber), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, makeTailByteFromPacketType(k.OBCIStreamPacketStandardAccel)]);
+  },
   samplePacketReal: sampleNumber => {
     return new Buffer([0xA0, sampleNumberNormalize(sampleNumber), 0x8F, 0xF2, 0x40, 0x8F, 0xDF, 0xF4, 0x90, 0x2B, 0xB6, 0x8F, 0xBF, 0xBF, 0x7F, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0x94, 0x25, 0x34, 0x20, 0xB6, 0x7D, 0, 0xE0, 0, 0xE0, 0x0F, 0x70, makeTailByteFromPacketType(k.OBCIStreamPacketStandardAccel)]);
   },
@@ -727,8 +724,221 @@ let utilitiesModule = {
         0b00000110, // 18
         0b00000111  // 19
       ]);
-  }
+  },
+  parseGanglion
 };
+
+/**
+ * @description Used transform raw data packets into fully qualified packets
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @return {Array} samples An array of {Sample}
+ * @author AJ Keller (@aj-ptw)
+ */
+function parseGanglion (o) {
+  const byteId = parseInt(o.rawDataPacket[0]);
+  if (byteId <= k.OBCIGanglionByteId19Bit.max) {
+    return processRouteSampleData(o);
+  } else {
+    switch (byteId) {
+      case k.OBCIGanglionByteIdMultiPacket:
+        return processMultiBytePacket(o);
+      case k.OBCIGanglionByteIdMultiPacketStop:
+        return processMultiBytePacketStop(o);
+      case k.OBCIGanglionByteIdImpedanceChannel1:
+      case k.OBCIGanglionByteIdImpedanceChannel2:
+      case k.OBCIGanglionByteIdImpedanceChannel3:
+      case k.OBCIGanglionByteIdImpedanceChannel4:
+      case k.OBCIGanglionByteIdImpedanceChannelReference:
+        return processImpedanceData(o);
+      default:
+        return null;
+    }
+  }
+}
+
+/**
+ * Process an compressed packet of data.
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @private
+ */
+function processCompressedData (o) {
+  // Save the packet counter
+  o.lastSampleNumber = parseInt(o.rawDataPacket[0]);
+
+  const samples = [];
+  // Decompress the buffer into array
+  if (o.lastSampleNumber <= k.OBCIGanglionByteId18Bit.max) {
+    decompressSamples(o, decompressDeltas18Bit(o.rawDataPacket.slice(k.OBCIGanglionPacket18Bit.dataStart, k.OBCIGanglionPacket18Bit.dataStop)));
+    samples.push(buildSample(o.lastSampleNumber * 2 - 1, o.decompressedSamples[1], o.sendCounts));
+    samples.push(buildSample(o.lastSampleNumber * 2, o.decompressedSamples[2], o.sendCounts));
+
+    switch (o.lastSampleNumber % 10) {
+      case k.OBCIGanglionAccelAxisX:
+        o.accelArray[0] = o.sendCounts ? o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) : o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) * k.OBCIGanglionAccelScaleFactor;
+        break;
+      case k.OBCIGanglionAccelAxisY:
+        o.accelArray[1] = o.sendCounts ? o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) : o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) * k.OBCIGanglionAccelScaleFactor;
+        break;
+      case k.OBCIGanglionAccelAxisZ:
+        o.accelArray[2] = o.sendCounts ? o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) : o.rawDataPacket.readInt8(k.OBCIGanglionPacket18Bit.auxByte - 1) * k.OBCIGanglionAccelScaleFactor;
+        if (o.sendCounts) {
+          samples[0].accelData = o.accelArray;
+        } else {
+          samples[0].accelDataCounts = o.accelArray;
+        }
+        break;
+      default:
+        break;
+    }
+  } else {
+    decompressSamples(o, decompressDeltas19Bit(o.rawDataPacket.slice(k.OBCIGanglionPacket19Bit.dataStart, k.OBCIGanglionPacket19Bit.dataStop)));
+
+    samples.push(buildSample((o.lastSampleNumber - 100) * 2 - 1, o.decompressedSamples[1], o.sendCounts));
+    samples.push(buildSample((o.lastSampleNumber - 100) * 2, o.decompressedSamples[2], o.sendCounts));
+  }
+
+  // Rotate the 0 position for next time
+  for (let i = 0; i < k.OBCINumberOfChannelsGanglion; i++) {
+    o.decompressedSamples[0][i] = o.decompressedSamples[2][i];
+  }
+
+  return samples;
+}
+
+/**
+ * Process and emit an impedance value
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @private
+ */
+function processImpedanceData (o) {
+  const byteId = parseInt(o.rawDataPacket[0]);
+  let channelNumber;
+  switch (byteId) {
+    case k.OBCIGanglionByteIdImpedanceChannel1:
+      channelNumber = 1;
+      break;
+    case k.OBCIGanglionByteIdImpedanceChannel2:
+      channelNumber = 2;
+      break;
+    case k.OBCIGanglionByteIdImpedanceChannel3:
+      channelNumber = 3;
+      break;
+    case k.OBCIGanglionByteIdImpedanceChannel4:
+      channelNumber = 4;
+      break;
+    case k.OBCIGanglionByteIdImpedanceChannelReference:
+      channelNumber = 0;
+      break;
+  }
+
+  let output = {
+    channelNumber: channelNumber,
+    impedanceValue: 0
+  };
+
+  let end = o.rawDataPacket.length;
+
+  while (Number.isNaN(Number(o.rawDataPacket.slice(1, end))) && end !== 0) {
+    end--;
+  }
+
+  if (end !== 0) {
+    output.impedanceValue = Number(o.rawDataPacket.slice(1, end));
+  }
+
+  return output;
+}
+
+/**
+ * Used to stack multi packet buffers into the multi packet buffer. This is finally emitted when a stop packet byte id
+ *  is received.
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @private
+ */
+function processMultiBytePacket (o) {
+  if (o.multiPacketBuffer) {
+    o.multiPacketBuffer = Buffer.concat([o.multiPacketBuffer, o.rawDataPacket.slice(k.OBCIGanglionPacket19Bit.dataStart, k.OBCIGanglionPacket19Bit.dataStop)]);
+  } else {
+    o.multiPacketBuffer = o.rawDataPacket.slice(k.OBCIGanglionPacket19Bit.dataStart, k.OBCIGanglionPacket19Bit.dataStop);
+  }
+}
+
+/**
+ * Adds the `data` buffer to the multi packet buffer and emits the buffer as 'message'
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @private
+ */
+function processMultiBytePacketStop (o) {
+  processMultiBytePacket(o);
+  const str = o.multiPacketBuffer;
+  o.multiPacketBuffer = null;
+  return str;
+}
+
+/**
+ * Utilize `receivedDeltas` to get actual count values.
+ * @param receivedDeltas {Array} - An array of deltas
+ *  of shape 2x4 (2 samples per packet and 4 channels per sample.)
+ * @private
+ */
+function decompressSamples (o, receivedDeltas) {
+  // add the delta to the previous value
+  for (let i = 1; i < 3; i++) {
+    for (let j = 0; j < 4; j++) {
+      o.decompressedSamples[i][j] = o.decompressedSamples[i - 1][j] - receivedDeltas[i - 1][j];
+    }
+  }
+}
+
+/**
+ * Builds a sample object from an array and sample number.
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @return {Array}
+ * @private
+ */
+function buildSample (sampleNumber, rawData, sendCounts) {
+  let sample;
+  if (sendCounts) {
+    sample = newSampleNoScale(sampleNumber);
+    sample.channelDataCounts = rawData;
+  } else {
+    sample = newSample(sampleNumber);
+    for (let j = 0; j < k.OBCINumberOfChannelsGanglion; j++) {
+      sample.channelData.push(rawData[j] * k.OBCIGanglionScaleFactorPerCountVolts);
+    }
+  }
+  sample.timestamp = Date.now();
+  return sample;
+}
+
+/**
+ * Used to route samples for Ganglion
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @returns {*}
+ */
+function processRouteSampleData (o) {
+  if (parseInt(o.rawDataPacket[0]) === k.OBCIGanglionByteIdUncompressed) {
+    return processUncompressedData(o);
+  } else {
+    return processCompressedData(o);
+  }
+}
+
+/**
+ * Process an uncompressed packet of data.
+ * @param o {RawDataToSample} - Used to hold data and configuration settings
+ * @private
+ */
+function processUncompressedData (o) {
+  // Resets the packet counter back to zero
+  o.lastSampleNumber = k.OBCIGanglionByteIdUncompressed;  // used to find dropped packets
+
+  for (let i = 0; i < 4; i++) {
+    o.decompressedSamples[0][i] = utilitiesModule.interpret24bitAsInt32(o.rawDataPacket.slice(1 + (i * 3), 1 + (i * 3) + 3));  // seed the decompressor
+  }
+
+  return [buildSample(0, o.decompressedSamples[0], o.sendCounts)];
+}
 
 /**
  * Converts a special ganglion 18 bit compressed number
@@ -954,8 +1164,6 @@ function decompressDeltas19Bit (buffer) {
   return receivedDeltas;
 }
 
-module.exports = utilitiesModule;
-
 function newImpedanceObject (channelNumber) {
   return {
     channel: channelNumber,
@@ -1120,12 +1328,8 @@ function parsePacketStandardAccel (o) {
   if (o.scale) sampleObject.channelData = getChannelDataArray(o);
   else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
-  if (k.getVersionNumber(process.version) >= 6) {
-    // From introduced in node version 6.x.x
-    sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  } else {
-    sampleObject.auxData = new Buffer(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  }
+  sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+
   // Get the sample number
   sampleObject.sampleNumber = o.rawDataPacket[k.OBCIPacketPositionSampleNumber];
   // Get the start byte
@@ -1168,12 +1372,8 @@ function parsePacketStandardRawAux (o) {
   else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   // Slice the buffer for the aux data
-  if (k.getVersionNumber(process.version) >= 6) {
-    // From introduced in node version 6.x.x
-    sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  } else {
-    sampleObject.auxData = new Buffer(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  }
+  sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+
   // Get the sample number
   sampleObject.sampleNumber = o.rawDataPacket[k.OBCIPacketPositionSampleNumber];
   // Get the start byte
@@ -1339,7 +1539,7 @@ function getBooleanFromRegisterQuery (str, regEx, offset) {
   let regExArr = str.match(regEx);
   if (regExArr) {
     const num = parseInt(str.charAt(regExArr.index + offset));
-    if (!_.isNaN(num)) {
+    if (!Number.isNaN(num)) {
       return Boolean(num);
     } else {
       throw new Error(k.OBCIErrorInvalidData);
@@ -1380,7 +1580,7 @@ function getNumFromThreeCSVADSRegisterQuery (str, regEx, offset) {
     const bit2 = parseInt(str.charAt(regExArr.index + offset));
     const bit1 = parseInt(str.charAt(regExArr.index + offset + 3));
     const bit0 = parseInt(str.charAt(regExArr.index + offset + 6));
-    if (!_.isNaN(bit2) && !_.isNaN(bit1) && !_.isNaN(bit0)) {
+    if (!Number.isNaN(bit2) && !Number.isNaN(bit1) && !Number.isNaN(bit0)) {
       return bit2 << 2 | bit1 << 1 | bit0;
     } else {
       throw new Error(k.OBCIErrorInvalidData);
@@ -1398,7 +1598,7 @@ function getNumFromThreeCSVADSRegisterQuery (str, regEx, offset) {
  */
 function setChSetFromADSRegisterQuery (str, channelSettings) {
   let key = k.OBCIRegisterQueryNameCHnSET[channelSettings.channelNumber];
-  if (_.isUndefined(key)) key = k.OBCIRegisterQueryNameCHnSET[channelSettings.channelNumber - k.OBCINumberOfChannelsCyton];
+  if (key === undefined) key = k.OBCIRegisterQueryNameCHnSET[channelSettings.channelNumber - k.OBCINumberOfChannelsCyton];
   channelSettings.powerDown = getBooleanFromRegisterQuery(str, key, 16);
   channelSettings.gain = k.gainForCommand(getNumFromThreeCSVADSRegisterQuery(str, key, 19));
   channelSettings.inputType = k.inputTypeForCommand(getNumFromThreeCSVADSRegisterQuery(str, key, 31));
@@ -1420,13 +1620,13 @@ function syncChannelSettingsWithRawData (o) {
 
   if (o.channelSettings.length === k.OBCINumberOfChannelsCyton) {
     if (o.data.toString().match(/Daisy ADS/)) throw new Error('raw data mismatch - expected only cyton register info but also found daisy');
-    if (_.isNull(o.data.toString().match(/Board ADS/))) throw new Error(k.OBCIErrorInvalidData);
+    if (o.data.toString().match(/Board ADS/) == null) throw new Error(k.OBCIErrorInvalidData);
   } else {
-    if (_.isNull(o.data.toString().match(/Daisy ADS/))) throw new Error('raw data mismatch - expected daisy register info but none found');
-    if (_.isNull(o.data.toString().match(/Board ADS/))) throw new Error('no Board ADS info found');
+    if (o.data.toString().match(/Daisy ADS/) == null) throw new Error('raw data mismatch - expected daisy register info but none found');
+    if (o.data.toString().match(/Board ADS/) == null) throw new Error('no Board ADS info found');
   }
 
-  _.forEach((o.channelSettings), (cs) => {
+  o.channelSettings.forEach(cs => {
     if (!cs.hasOwnProperty('channelNumber') || !cs.hasOwnProperty('powerDown') || !cs.hasOwnProperty('gain') || !cs.hasOwnProperty('inputType') || !cs.hasOwnProperty('bias') || !cs.hasOwnProperty('srb2') || !cs.hasOwnProperty('srb1')) {
       throw new Error(k.OBCIErrorMissingRequiredProperty);
     }
@@ -1447,12 +1647,12 @@ function syncChannelSettingsWithRawData (o) {
       usingSRB1Daisy = true;
     }
   }
-  _.forEach(o.channelSettings,
+  o.channelSettings.forEach(
     /**
      * Set each channel
      * @param cs {ChannelSettingsObject}
      */
-    (cs) => {
+    cs => {
       if (cs.channelNumber < k.OBCINumberOfChannelsCyton) {
         setChSetFromADSRegisterQuery(adsCyton, cs);
         cs.bias = getBiasSetFromADSRegisterQuery(adsCyton, cs.channelNumber);
@@ -1527,11 +1727,7 @@ function getFromTimePacketRawAux (dataBuf) {
   if (dataBuf.byteLength !== k.OBCIPacketSize) {
     throw new Error(k.OBCIErrorInvalidByteLength);
   }
-  if (k.getVersionNumber(process.version) >= 6) {
-    return Buffer.from(dataBuf.slice(k.OBCIPacketPositionTimeSyncAuxStart, k.OBCIPacketPositionTimeSyncAuxStop));
-  } else {
-    return new Buffer(dataBuf.slice(k.OBCIPacketPositionTimeSyncAuxStart, k.OBCIPacketPositionTimeSyncAuxStop));
-  }
+  return Buffer.from(dataBuf.slice(k.OBCIPacketPositionTimeSyncAuxStart, k.OBCIPacketPositionTimeSyncAuxStop));
 }
 
 /**
@@ -1802,6 +1998,8 @@ function makeDaisySampleObject (lowerSampleObject, upperSampleObject) {
     'upper': upperSampleObject.auxData
   };
 
+  daisySampleObject.stopByte = lowerSampleObject.stopByte;
+
   daisySampleObject.timestamp = (lowerSampleObject.timestamp + upperSampleObject.timestamp) / 2;
 
   daisySampleObject['_timestamps'] = {
@@ -1815,7 +2013,9 @@ function makeDaisySampleObject (lowerSampleObject, upperSampleObject) {
     } else {
       daisySampleObject.accelData = upperSampleObject.accelData;
     }
-  } else if (lowerSampleObject.hasOwnProperty('accelDataCounts')) {
+  }
+
+  if (lowerSampleObject.hasOwnProperty('accelDataCounts')) {
     if (lowerSampleObject.accelDataCounts[0] > 0 || lowerSampleObject.accelDataCounts[1] > 0 || lowerSampleObject.accelDataCounts[2] > 0) {
       daisySampleObject.accelDataCounts = lowerSampleObject.accelDataCounts;
     } else {
@@ -1865,15 +2065,27 @@ function makeDaisySampleObjectWifi (lowerSampleObject, upperSampleObject) {
     daisySampleObject['timestamp'] = lowerSampleObject.timestamp;
   }
 
+  daisySampleObject.stopByte = lowerSampleObject.stopByte;
+
   daisySampleObject['_timestamps'] = {
     'lower': lowerSampleObject.timestamp,
     'upper': upperSampleObject.timestamp
   };
 
-  if (lowerSampleObject.accelData) {
-    daisySampleObject['accelData'] = lowerSampleObject.accelData;
-  } else if (upperSampleObject.accelData) {
-    daisySampleObject['accelData'] = upperSampleObject.accelData;
+  if (lowerSampleObject.hasOwnProperty('accelData')) {
+    if (lowerSampleObject.accelData[0] > 0 || lowerSampleObject.accelData[1] > 0 || lowerSampleObject.accelData[2] > 0) {
+      daisySampleObject.accelData = lowerSampleObject.accelData;
+    } else {
+      daisySampleObject.accelData = upperSampleObject.accelData;
+    }
+  }
+
+  if (lowerSampleObject.hasOwnProperty('accelDataCounts')) {
+    if (lowerSampleObject.accelDataCounts[0] > 0 || lowerSampleObject.accelDataCounts[1] > 0 || lowerSampleObject.accelDataCounts[2] > 0) {
+      daisySampleObject.accelDataCounts = lowerSampleObject.accelDataCounts;
+    } else {
+      daisySampleObject.accelDataCounts = upperSampleObject.accelDataCounts;
+    }
   }
 
   daisySampleObject['valid'] = true;
@@ -2007,12 +2219,7 @@ function stripToEOTBuffer (dataBuffer) {
   }
 
   if (indexOfEOT < dataBuffer.byteLength) {
-    if (k.getVersionNumber(process.version) >= 6) {
-      // From introduced in node version 6.x.x
-      return Buffer.from(dataBuffer.slice(indexOfEOT));
-    } else {
-      return new Buffer(dataBuffer.slice(indexOfEOT));
-    }
+    return Buffer.from(dataBuffer.slice(indexOfEOT));
   } else {
     return null;
   }
@@ -2155,3 +2362,5 @@ function makeTailByteFromPacketType (type) {
 function isStopByte (byte) {
   return (byte & 0xF0) === k.OBCIByteStop;
 }
+
+export default utilitiesModule;

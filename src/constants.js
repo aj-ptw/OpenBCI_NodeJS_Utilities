@@ -4,8 +4,7 @@
 *     OpenBCI Board
 */
 'use strict';
-const _ = require('lodash');
-const Buffer = require('safe-buffer').Buffer;
+import { Buffer } from 'buffer/';
 
 /** Turning channels off */
 const obciChannelOff1 = '1';
@@ -1276,7 +1275,6 @@ const constantsModule = {
   OBCIRegisterQuerySizeCytonFirmwareV3: obciRegisterQuerySizeCytonFirmwareV3,
   OBCIRegisterQuerySizeCytonDaisyFirmwareV3: obciRegisterQuerySizeCytonDaisyFirmwareV3
 };
-module.exports = constantsModule;
 
 /**
 * @description To add a usability abstraction layer above channel setting commands. Due to the
@@ -1716,17 +1714,27 @@ function channelSettingsObjectDefault (channelNumber) {
  * @returns {RawDataToSample} - A new object
  */
 function rawDataToSampleObjectDefault (numChannels) {
-  if (_.isUndefined(numChannels)) numChannels = obciNumberOfChannelsDefault;
+  if (numChannels === undefined) numChannels = obciNumberOfChannelsDefault;
   return {
     accelArray: [0, 0, 0],
     channelSettings: constantsModule.channelSettingsArrayInit(numChannels),
+    decompressedSamples: decompressedSamplesInit(numChannels),
     lastSampleNumber: 0,
     rawDataPacket: Buffer.alloc(33),
     rawDataPackets: [],
     scale: true,
+    sendCounts: false,
     timeOffset: 0,
     verbose: false
   };
+}
+
+function decompressedSamplesInit (numChannels) {
+  let output = [];
+  for (let i = 0; i < 3; i++) {
+    output.push(new Array(numChannels));
+  }
+  return output;
 }
 
 /**
@@ -1837,7 +1845,7 @@ function commandBoardModeForMode (boardMode) {
 function getPeripheralLocalNames (pArray) {
   return new Promise((resolve, reject) => {
     var list = [];
-    _.forEach(pArray, (perif) => {
+    pArray.forEach(perif => {
       list.push(perif.advertisement.localName);
     });
     if (list.length > 0) {
@@ -1856,7 +1864,7 @@ function getPeripheralLocalNames (pArray) {
 function getPeripheralWithLocalName (pArray, localName) {
   return new Promise((resolve, reject) => {
     if (typeof (pArray) !== 'object') return reject(Error(`pArray must be of type Object`));
-    _.forEach(pArray, (perif) => {
+    pArray.forEach(perif => {
       if (perif.advertisement.hasOwnProperty('localName')) {
         if (perif.advertisement.localName === localName) {
           return resolve(perif);
@@ -1894,3 +1902,5 @@ function isPeripheralGanglion (peripheral) {
   }
   return false;
 }
+
+export default constantsModule;
