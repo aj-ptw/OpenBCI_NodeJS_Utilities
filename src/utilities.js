@@ -36,6 +36,11 @@ let utilitiesModule = {
    * @property {Number} impedanceValue The impedance in ohms
    */
   /**
+   * @typedef {Object} Message
+   * @property {Buffer} buffer - The raw buffer of data
+   * @property {String} message - The raw buffer converted in to a string
+   */
+  /**
    * @typedef {Object} RawDataToSample
    * @property {Array} rawDataPackets - An array of rawDataPackets
    * @property {Buffer} rawDataPacket - A single raw data packet
@@ -731,7 +736,7 @@ let utilitiesModule = {
 /**
  * @description Used transform raw data packets into fully qualified packets
  * @param o {RawDataToSample} - Used to hold data and configuration settings
- * @return {Array} samples An array of {Sample}
+ * @return {Impedance | [Sample] | Message | null} Can return a multiple objects or null
  * @author AJ Keller (@aj-ptw)
  */
 function parseGanglion (o) {
@@ -870,9 +875,12 @@ function processMultiBytePacket (o) {
  */
 function processMultiBytePacketStop (o) {
   processMultiBytePacket(o);
-  const str = o.multiPacketBuffer;
+  const buf = o.multiPacketBuffer;
   o.multiPacketBuffer = null;
-  return str;
+  return {
+    message: buf.toString(),
+    buffer: buf
+  };
 }
 
 /**

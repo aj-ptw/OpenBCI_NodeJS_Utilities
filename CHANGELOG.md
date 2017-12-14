@@ -1,3 +1,9 @@
+# v0.3.2
+
+### Bug Fixes
+
+* Multibyte messages were passed back as weird
+
 # v0.3.1
 
 ### Enhancements 
