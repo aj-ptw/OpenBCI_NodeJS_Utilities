@@ -1330,11 +1330,11 @@ function parsePacketStandardAccel (o) {
 
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
 
-  if (o.scale) sampleObject.accelData = getDataArrayAccel(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  else sampleObject.accelDataCounts = getDataArrayAccelNoScale(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+  sampleObject.accelData = getDataArrayAccel(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+  sampleObject.accelDataCounts = getDataArrayAccelNoScale(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
 
-  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
-  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  sampleObject.channelData = getChannelDataArray(o);
+  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
 
@@ -1376,8 +1376,8 @@ function parsePacketStandardRawAux (o) {
 
   // Store the channel data
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
-  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  sampleObject.channelData = getChannelDataArray(o);
+  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   // Slice the buffer for the aux data
   sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
@@ -1444,13 +1444,13 @@ function parsePacketTimeSyncedAccel (o) {
   sampleObject.auxData = getFromTimePacketRawAux(o.rawDataPacket);
 
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
-  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  sampleObject.channelData = getChannelDataArray(o);
+  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   // Grab the accelData only if `getFromTimePacketAccel` returns true.
   if (getFromTimePacketAccel(o)) {
-    if (o.scale) sampleObject.accelData = o.accelArray;
-    else sampleObject.accelDataCounts = o.accelArray;
+    sampleObject.accelData = o.accelArray;
+    sampleObject.accelDataCounts = o.accelArray;
   }
 
   sampleObject.valid = true;
@@ -1503,8 +1503,8 @@ function parsePacketTimeSyncedRawAux (o) {
 
   // Grab the channel data.
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
-  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  sampleObject.channelData = getChannelDataArray(o);
+  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   sampleObject.valid = true;
 
