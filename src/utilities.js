@@ -596,6 +596,7 @@ let utilitiesModule = {
   getDataArrayAccel,
   getDataArrayAccelNoScale,
   getFirmware,
+  getScaleFactor,
   getSRB1FromADSRegisterQuery,
   getNumFromThreeCSVADSRegisterQuery,
   isEven,
@@ -1330,11 +1331,11 @@ function parsePacketStandardAccel (o) {
 
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
 
-  sampleObject.accelData = getDataArrayAccel(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
-  sampleObject.accelDataCounts = getDataArrayAccelNoScale(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+  if (o.scale) sampleObject.accelData = getDataArrayAccel(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
+  else sampleObject.accelDataCounts = getDataArrayAccelNoScale(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
 
-  sampleObject.channelData = getChannelDataArray(o);
-  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
+  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
 
@@ -1376,8 +1377,8 @@ function parsePacketStandardRawAux (o) {
 
   // Store the channel data
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  sampleObject.channelData = getChannelDataArray(o);
-  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
+  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   // Slice the buffer for the aux data
   sampleObject.auxData = Buffer.from(o.rawDataPacket.slice(k.OBCIPacketPositionStartAux, k.OBCIPacketPositionStopAux + 1));
@@ -1444,13 +1445,13 @@ function parsePacketTimeSyncedAccel (o) {
   sampleObject.auxData = getFromTimePacketRawAux(o.rawDataPacket);
 
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  sampleObject.channelData = getChannelDataArray(o);
-  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
+  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   // Grab the accelData only if `getFromTimePacketAccel` returns true.
   if (getFromTimePacketAccel(o)) {
-    sampleObject.accelData = o.accelArray;
-    sampleObject.accelDataCounts = o.accelArray;
+    if (o.scale) sampleObject.accelData = o.accelArray;
+    else sampleObject.accelDataCounts = o.accelArray;
   }
 
   sampleObject.valid = true;
@@ -1503,8 +1504,8 @@ function parsePacketTimeSyncedRawAux (o) {
 
   // Grab the channel data.
   if (k.isUndefined(o.scale) || k.isNull(o.scale)) o.scale = true;
-  sampleObject.channelData = getChannelDataArray(o);
-  sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
+  if (o.scale) sampleObject.channelData = getChannelDataArray(o);
+  else sampleObject.channelDataCounts = getChannelDataArrayNoScale(o);
 
   sampleObject.valid = true;
 
@@ -1770,6 +1771,37 @@ function getDataArrayAccelNoScale (dataBuf) {
   return accelData;
 }
 
+function getScaleFactor (o, index) {
+  let scaleFactor = 0;
+  const sampleNumber = o.rawDataPacket[k.OBCIPacketPositionSampleNumber];
+  const daisy = o.channelSettings.length === k.OBCINumberOfChannelsDaisy;
+
+  if (o.protocol === k.OBCIProtocolSerial) {
+    if (isEven(sampleNumber) && daisy) {
+      scaleFactor = ADS1299_VREF / o.channelSettings[index + k.OBCINumberOfChannelsDefault].gain / (Math.pow(2, 23) - 1);
+    } else {
+      scaleFactor = ADS1299_VREF / o.channelSettings[index].gain / (Math.pow(2, 23) - 1);
+    }
+  } else if (o.protocol === k.OBCIProtocolWifi) {
+    if (daisy) {
+      if (o.lastSampleNumber === sampleNumber) {
+        scaleFactor = ADS1299_VREF / o.channelSettings[index + k.OBCINumberOfChannelsDefault].gain / (Math.pow(2, 23) - 1);
+      } else {
+        scaleFactor = ADS1299_VREF / o.channelSettings[index].gain / (Math.pow(2, 23) - 1);
+      }
+    } else if (o.channelSettings.length === k.OBCINumberOfChannelsCyton) {
+      scaleFactor = ADS1299_VREF / o.channelSettings[index].gain / (Math.pow(2, 23) - 1);
+    } else {
+      scaleFactor = k.OBCIGanglionScaleFactorPerCountVolts;
+    }
+  } else if (o.protocol === k.OBCIProtocolBLE) { // For cyton ble not ganglion
+    scaleFactor = ADS1299_VREF / o.channelSettings[index].gain / (Math.pow(2, 23) - 1);
+  } else {
+    throw new Error('Error [getChannelDataArray]: Invalid protocol must be wifi or serial');
+  }
+  return scaleFactor;
+}
+
 /**
  * @description Takes a buffer filled with 24 bit signed integers from an OpenBCI device with gain settings in
  *                  channelSettingsArray[index].gain and converts based on settings of ADS1299... spits out an
@@ -1795,7 +1827,6 @@ function getChannelDataArray (o) {
   let channelData = [];
   // Grab the sample number from the buffer
   const numChannels = o.channelSettings.length;
-  const sampleNumber = o.rawDataPacket[k.OBCIPacketPositionSampleNumber];
   const daisy = numChannels === k.OBCINumberOfChannelsDaisy;
   let channelsInPacket = k.OBCINumberOfChannelsCyton;
   if (!daisy) channelsInPacket = o.channelSettings.length;
@@ -1808,31 +1839,7 @@ function getChannelDataArray (o) {
       throw new Error('Error [getChannelDataArray]: Property gain of channelSettingsObject not or type Number');
     }
 
-    let scaleFactor = 0;
-
-    if (o.protocol === k.OBCIProtocolSerial) {
-      if (isEven(sampleNumber) && daisy) {
-        scaleFactor = ADS1299_VREF / o.channelSettings[i + k.OBCINumberOfChannelsDefault].gain / (Math.pow(2, 23) - 1);
-      } else {
-        scaleFactor = ADS1299_VREF / o.channelSettings[i].gain / (Math.pow(2, 23) - 1);
-      }
-    } else if (o.protocol === k.OBCIProtocolWifi) {
-      if (daisy) {
-        if (o.lastSampleNumber === sampleNumber) {
-          scaleFactor = ADS1299_VREF / o.channelSettings[i + k.OBCINumberOfChannelsDefault].gain / (Math.pow(2, 23) - 1);
-        } else {
-          scaleFactor = ADS1299_VREF / o.channelSettings[i].gain / (Math.pow(2, 23) - 1);
-        }
-      } else if (o.channelSettings.length === k.OBCINumberOfChannelsCyton) {
-        scaleFactor = ADS1299_VREF / o.channelSettings[i].gain / (Math.pow(2, 23) - 1);
-      } else {
-        scaleFactor = k.OBCIGanglionScaleFactorPerCountVolts;
-      }
-    } else if (o.protocol === k.OBCIProtocolBLE) { // For cyton ble not ganglion
-      scaleFactor = ADS1299_VREF / o.channelSettings[i].gain / (Math.pow(2, 23) - 1);
-    } else {
-      throw new Error('Error [getChannelDataArray]: Invalid protocol must be wifi or serial');
-    }
+    const scaleFactor = getScaleFactor(o, i);
 
     // Convert the three byte signed integer and convert it
     channelData.push(scaleFactor * utilitiesModule.interpret24bitAsInt32(o.rawDataPacket.slice((i * 3) + k.OBCIPacketPositionChannelDataStart, (i * 3) + k.OBCIPacketPositionChannelDataStart + 3)));
